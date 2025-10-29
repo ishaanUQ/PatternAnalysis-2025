@@ -21,3 +21,26 @@ df_raw = pd.read_csv(metadata, index_col=0)
 df = df_raw[["isic_id", "target"]].copy()
 df["isic_id"] = df["isic_id"].astype(str) + ".jpg"
 df.rename(columns={"isic_id": "image_name"}, inplace=True)
+
+# Copying images from cashe cleaned data directory
+raw_images_path = root / "train-image" / "image"
+data = Path("data")
+cleaned_images = data / "train-image" / "image"
+cleaned_images.mkdir(parents=True, exist_ok=True)
+
+missing = 0
+for image in df["image_name"]:
+    src = raw_images_path / image
+    dst = cleaned_images / image
+    if src.exists():
+        if not dst.exists():  # Skip if already copied
+            shutil.copy2(src, dst)
+    else:
+        missing += 1
+#Should know if any images are missing
+if missing:
+    print(f"{missing} images missing, check dataset and retry")
+else: 
+    print("All good")
+    #store metadata in cleaned directory as well
+    (df[["image_name", "target"]]).to_csv(data / "train-metadata.csv", index=False)
