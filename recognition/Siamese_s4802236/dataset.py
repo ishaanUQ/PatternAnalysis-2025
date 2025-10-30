@@ -90,141 +90,61 @@ def make_transforms(img_size: int = 224):
         norm,
     ])
     return train_tfm, eval_tfm
-
-
-
 class SkinLesionDataset(Dataset):
-    """Simple (image, label, path) dataset."""
-    def __init__(self, image_paths: np.ndarray, labels: np.ndarray, tfm=None):
-        assert len(image_paths) == len(labels)
+    """(image, label, path)."""
+    def __init__(self, image_paths, labels, tfm=None):
         self.paths = image_paths
         self.labels = labels.astype(int)
         self.tfm = tfm
-
-    def __len__(self): 
-        return len(self.paths)
-
+    def __len__(self): return len(self.paths)
     def __getitem__(self, i: int):
         p = self.paths[i]
         img = Image.open(p).convert("RGB")
         if self.tfm: img = self.tfm(img)
         return img, int(self.labels[i]), str(p)
 
-
 class TripletSet(Dataset):
-    """Yields (A,P,N,labelA). Keeps structure different to the earlier code and ensures P!=A."""
-    def __init__(self, image_paths: np.ndarray, labels: np.ndarray, tfm=None):
-        self.tfm = tfm
-        self.paths = image_paths
+    """
+    Triplet dataset where the DataLoader index is the *anchor index*.
+    We then sample:
+      - a positive from the same class (different index),
+      - a negative from the other class.
+    This makes it compatible with WeightedRandomSampler over anchors.
+    """
+    def __init__(self, image_paths, labels, tfm=None):
+        self.paths  = image_paths
         self.labels = labels.astype(int)
-        idx0 = np.where(self.labels == 0)[0].tolist()
-        idx1 = np.where(self.labels == 1)[0].tolist()
-        self.by_class = {0: idx0, 1: idx1}
-        # length: twice the larger class for balanced anchors
-        self._len = 2 * max(len(idx0), len(idx1))
+        self.tfm    = tfm
 
-    def __len__(self): return self._len
+        # precompute indices by class for fast sampling
+        self.by_class = {
+            0: np.where(self.labels == 0)[0].tolist(),
+            1: np.where(self.labels == 1)[0].tolist(),
+        }
+
+    def __len__(self):
+        # one anchor per image -> sampler can reweight/oversample
+        return len(self.paths)
 
     def _load(self, idx: int):
         img = Image.open(self.paths[idx]).convert("RGB")
         return self.tfm(img) if self.tfm else transforms.ToTensor()(img)
 
-    def __getitem__(self, i: int):
-        anchor_class = 1 if (i % 2 == 0) else 0
-        other_class = 1 - anchor_class
-        a_idx = random.choice(self.by_class[anchor_class])
-        # sample a positive different from anchor
-        p_idx = a_idx
-        if len(self.by_class[anchor_class]) > 1:
-            while p_idx == a_idx:
-                p_idx = random.choice(self.by_class[anchor_class])
-        n_idx = random.choice(self.by_class[other_class])
-        A = self._load(a_idx); P = self._load(p_idx); N = self._load(n_idx)
-        return A, P, N, int(self.labels[a_idx])
-    
+    def __getitem__(self, anchor_idx: int):
+        y_anchor = int(self.labels[anchor_idx])
 
-def class_weights(labels: np.ndarray) -> torch.Tensor:
-    """Weight inversely proportional to class frequency (for CE loss or info)."""
-    vals, counts = np.unique(labels, return_counts=True)
-    freqs = counts / counts.sum()
-    w = {int(c): float(1.0 / f) for c, f in zip(vals, freqs)}
-    return torch.tensor([w[0], w[1]], dtype=torch.float32)
+        # choose a positive (same class, different index)
+        pos_idx = anchor_idx
+        same_pool = self.by_class[y_anchor]
+        if len(same_pool) > 1:
+            while pos_idx == anchor_idx:
+                pos_idx = random.choice(same_pool)
 
-def make_weighted_sampler(labels: np.ndarray) -> WeightedRandomSampler:
-    """Per-sample weights so minority class is seen more often in training."""
-    vals, counts = np.unique(labels, return_counts=True)
-    freq = {int(v): float(c) for v, c in zip(vals, counts)}
-    weights = np.array([1.0 / freq[int(y)] for y in labels], dtype=np.float32)
-    return WeightedRandomSampler(weights, num_samples=len(labels), replacement=True)
+        # choose a negative (other class)
+        other_class = 1 - y_anchor
+        neg_idx = random.choice(self.by_class[other_class])
 
-def data_loaders(
-    batch_size: int = 32,
-    num_workers: int = 2,
-    img_size: int = 224,
-    seed: int = 42,
-    use_weighted_sampler: bool = True,
-    triplet_mode: bool = False
-) -> dict[str, object]:
-    """
-    Returns:
-      {
-        'train': DataLoader,
-        'val': DataLoader,
-        'test': DataLoader,
-        'train_cls_weights': torch.Tensor (for CE),
-        'splits': {'train':(paths,labels), 'val':(...), 'test':(...)}
-      }
-    Uses the globals `image_paths, labels` you prepared above.
-    """
-    set_seed(seed)
-    (tr_x, tr_y), (va_x, va_y), (te_x, te_y) = split_data(image_paths, labels, seed=seed)
-    train_tfm, eval_tfm = make_transforms(img_size)
-
-    if triplet_mode:
-        train_set = TripletSet(tr_x, tr_y, tfm=train_tfm)
-        # For triplet training you usually don’t use a weighted sampler — anchors are balanced by construction.
-        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
-                                num_workers=num_workers, pin_memory=True, drop_last=True)
-        # For val/test we still want plain classification batches for metrics
-        val_set  = SkinLesionDataset(va_x, va_y, tfm=eval_tfm)
-        test_set = SkinLesionDataset(te_x, te_y, tfm=eval_tfm)
-        val_loader  = DataLoader(val_set,  batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True)
-        test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True)
-        cls_w = class_weights(tr_y)
-    else:
-        train_set = SkinLesionDataset(tr_x, tr_y, tfm=train_tfm)
-        val_set   = SkinLesionDataset(va_x, va_y, tfm=eval_tfm)
-        test_set  = SkinLesionDataset(te_x, te_y, tfm=eval_tfm)
-
-        if use_weighted_sampler:
-            sampler = make_weighted_sampler(tr_y)
-            train_loader = DataLoader(train_set, batch_size=batch_size, sampler=sampler,
-            num_workers=num_workers, pin_memory=True, drop_last=True)
-        else:
-            train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
-            num_workers=num_workers, pin_memory=True, drop_last=True)
-
-        val_loader  = DataLoader(val_set,  batch_size=batch_size, shuffle=False,
-                                num_workers=num_workers, pin_memory=True)
-        test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False,
-                                num_workers=num_workers, pin_memory=True)
-        cls_w = class_weights(tr_y)
-
-    return {
-        "train": train_loader,
-        "val":   val_loader,
-        "test":  test_loader,
-        "train_cls_weights": cls_w,  # handy for nn.CrossEntropyLoss(weight=cls_w.to(device))
-        "splits": {
-            "train": (tr_x, tr_y),
-            "val":   (va_x, va_y),
-            "test":  (te_x, te_y),
-        }
-    }
-
-
-meta_path, images_folder = prepare_isic2020()
-
-image_paths, labels = load_data(meta_path, images_folder)
+        A = self._load(anchor_idx)
+        P = self._load(pos_idx)
+        N = self._load(neg_idx)
+        return A, P, N, y_anchor
