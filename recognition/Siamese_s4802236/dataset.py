@@ -61,9 +61,9 @@ def load_data(metadata_path: Path, images_folder: Path):
 def split_data(images: np.ndarray, labels: np.ndarray, seed: int = 42):
     """0.8 train, 0.1 val, 0.1 test (stratified)."""
     tr_x, te_x, tr_y, te_y = train_test_split(images, labels, test_size=0.2,
-                                              random_state=seed, stratify=labels)
+                                            random_state=seed, stratify=labels)
     va_x, te_x, va_y, te_y = train_test_split(te_x, te_y, test_size=0.5,
-                                              random_state=seed, stratify=te_y)
+                                            random_state=seed, stratify=te_y)
     return (tr_x, tr_y), (va_x, va_y), (te_x, te_y)
 
 
@@ -107,8 +107,8 @@ class TripletSet(Dataset):
     """
     Triplet dataset where the DataLoader index is the *anchor index*.
     We then sample:
-      - a positive from the same class (different index),
-      - a negative from the other class.
+    - a positive from the same class (different index),
+    - a negative from the other class.
     This makes it compatible with WeightedRandomSampler over anchors.
     """
     def __init__(self, image_paths, labels, tfm=None):
