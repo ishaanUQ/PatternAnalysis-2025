@@ -24,25 +24,25 @@ def prepare_isic2020(clean_root: str | Path ="data", force: bool = False) -> tup
 
 
     raw_images_path = src_root / "train-image" / "image"
-    images_path = root / "train-image" / "image"
+    images_folder = root / "train-image" / "image"
 
     raw_metadata = src_root / "train-metadata.csv"
     metadata_path = root / "train-metadata.csv"
 
     
-    if metadata_path.exists() and images_path.exists() and not force:
-        return metadata_path, images_path
+    if metadata_path.exists() and images_folder.exists() and not force:
+        return metadata_path, images_folder
     
     df_raw = pd.read_csv(raw_metadata, index_col=0)
     print(df_raw.head())
     df = df_raw[["isic_id", "target"]].copy()
     df["isic_id"] = df["isic_id"].astype(str) + ".jpg"
     df.rename(columns={"isic_id": "image_name"}, inplace=True)
-    images_path.mkdir(parents=True, exist_ok=True)
+    images_folder.mkdir(parents=True, exist_ok=True)
     missing = 0
     for name in df["image_name"]:
         src = raw_images_path / name
-        dst = images_path / name
+        dst = images_folder / name
         if src.exists():
             if not dst.exists():  # Skip if already copied
                 shutil.copy2(src, dst)
@@ -53,12 +53,18 @@ def prepare_isic2020(clean_root: str | Path ="data", force: bool = False) -> tup
     
     root.mkdir(parents=True, exist_ok=True)
     print(df.head())
-    return metadata_path, images_path
+    df.to_csv(metadata_path, index=False)
+    return metadata_path, images_folder
 
-def load_data(metadata_path: str, images_path: str | Path, subset: int | None=None) -> tuple[list]:
-    pass
+def load_data(metadata_path: Path, images_folder: Path) -> tuple[list]:
+    metadata = pd.read_csv(metadata_path)
+    
+    labels_dict = dict(zip(metadata["image_name"].astype(str), metadata["target"]))
+    image_paths = [images_folder / n for n in metadata["image_name"] if (images_folder / n).exists()]
+    labels = [labels_dict[p.name] for p in image_paths]
+    return np.array(image_paths), np.array(labels)
 
 
+meta_path, images_folder = prepare_isic2020()
 
-
-meta_path, img_dir = prepare_isic2020()
+image_paths, labels = load_data(meta_path, images_folder)
