@@ -65,3 +65,7 @@ class SiameseClassifier(nn.Module):
     def forward(self, x):
         z = self.encoder(x)
         return self.head(z), z
+class TripletMarginLossWrapper(nn.Module):
+    def __init__(self, margin: float = 0.3, p: float = 2.0, swap: bool = False):
+        super().__init__(); self.loss = nn.TripletMarginLoss(margin=margin, p=p, swap=swap)
+    def forward(self, zA, zP, zN): return self.loss(zA, zP, zN)
