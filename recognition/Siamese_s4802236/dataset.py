@@ -148,3 +148,15 @@ class TripletSet(Dataset):
         P = self._load(pos_idx)
         N = self._load(neg_idx)
         return A, P, N, y_anchor
+
+def class_weights(labels: np.ndarray) -> torch.Tensor:
+    vals, counts = np.unique(labels, return_counts=True)
+    freqs = counts / counts.sum()
+    w = {int(c): float(1.0 / f) for c, f in zip(vals, freqs)}
+    return torch.tensor([w[0], w[1]], dtype=torch.float32)
+
+def make_weighted_sampler(labels: np.ndarray) -> WeightedRandomSampler:
+    vals, counts = np.unique(labels, return_counts=True)
+    freq = {int(v): float(c) for v, c in zip(vals, counts)}
+    weights = np.array([1.0 / freq[int(y)] for y in labels], dtype=np.float32)
+    return WeightedRandomSampler(weights, num_samples=len(labels), replacement=True)
