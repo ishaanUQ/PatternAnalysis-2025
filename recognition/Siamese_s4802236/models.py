@@ -47,3 +47,21 @@ class Encoder(nn.Module):
     def forward(self, x):
         feats = self.backbone(x)
         return self.proj(feats)
+class SiameseTripletNet(nn.Module):
+    def __init__(self, encoder: Encoder):
+        super().__init__(); self.encoder = encoder
+    def forward(self, A, P, N):
+        B = A.shape[0]
+        Z = self.encoder(torch.cat([A,P,N], dim=0))
+        return torch.split(Z, B, dim=0)
+
+class SiameseClassifier(nn.Module):
+    def __init__(self, encoder: Encoder, num_classes: int = 2):
+        super().__init__()
+        self.encoder = encoder
+        self.head = nn.Linear(self.encoder.proj.net[-1].out_features, num_classes)
+        nn.init.kaiming_normal_(self.head.weight, nonlinearity="linear")
+        if self.head.bias is not None: nn.init.zeros_(self.head.bias)
+    def forward(self, x):
+        z = self.encoder(x)
+        return self.head(z), z
