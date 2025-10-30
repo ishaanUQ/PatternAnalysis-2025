@@ -9,7 +9,7 @@ import shutil
 import random, numpy as np
 import torch, torch.nn as nn
 from torchvision import transforms
-
+from sklearn.model_selection import train_test_split
 ### FUNCTIONS ###
 def prepare_isic2020(clean_root: str | Path ="data", force: bool = False) -> tuple[Path, Path]:
     """ Prepares the ISIC 2020 224x224 dataset from Kaggle"""
@@ -64,7 +64,14 @@ def load_data(metadata_path: Path, images_folder: Path) -> tuple[list]:
     labels = [labels_dict[p.name] for p in image_paths]
     return np.array(image_paths), np.array(labels)
 
+def split_data(images: np.ndarray, labels: np.ndarray, seed: int = 42) -> tuple:
+    """ Splits data into 0.8 train, 0.2 test sets """
+    train_images, test_images, train_labels, test_labels = train_test_split(
+        images, labels, test_size=0.2, random_state=seed, stratify=labels
+    )
+    return train_images, test_images, train_labels, test_labels
 
 meta_path, images_folder = prepare_isic2020()
 
 image_paths, labels = load_data(meta_path, images_folder)
+
