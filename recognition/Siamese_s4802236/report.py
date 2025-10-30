@@ -1,10 +1,11 @@
 from matplotlib import pyplot as plt
 import numpy as np
 import torch
-from modules import set_device
+from dataset import data_loaders
+from modules import build_model, set_device
+from train import BEST_CKPT, TRAIN_HISTORY
 
 
-device = set_device()
 
 @torch.no_grad()
 def collect_probs_targets(model, loader, device):
@@ -40,3 +41,15 @@ def plot_training_curves(H):
         plt.plot(epochs, H["val_auc"], label="Val AUROC")
         plt.xlabel("Epoch"); plt.ylabel("AUROC"); plt.title("AUROC (Train vs Val)")
         plt.legend(); plt.grid(True, alpha=0.3); plt.ylim(0.5, 1.0); plt.show()
+
+device = set_device()
+
+packs = data_loaders(triplet_mode=False, seed=42)
+train_loader, val_loader, test_loader = packs["train"], packs["val"], packs["test"]
+
+clf = build_model(mode="classifier", embed_dim=128, pretrained=False, freeze_until="none").to(device)
+clf.load_state_dict(BEST_CKPT, strict=True)
+clf.eval()
+
+# 1) Training curves
+plot_training_curves(TRAIN_HISTORY)
