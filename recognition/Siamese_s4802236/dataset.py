@@ -161,73 +161,123 @@ def make_weighted_sampler(labels: np.ndarray) -> WeightedRandomSampler:
     weights = np.array([1.0 / freq[int(y)] for y in labels], dtype=np.float32)
     return WeightedRandomSampler(weights, num_samples=len(labels), replacement=True)
 
+def make_weighted_anchor_sampler(labels: np.ndarray) -> WeightedRandomSampler:
+    """
+    For triplet training: per-anchor weights ∝ 1 / class_freq(anchor_class).
+    This balances anchor selection across classes.
+    """
+    vals, counts = np.unique(labels, return_counts=True)
+    freq = {int(v): float(c) for v, c in zip(vals, counts)}
+    weights = np.array([1.0 / freq[int(y)] for y in labels], dtype=np.float32)
+    return WeightedRandomSampler(weights, num_samples=len(labels), replacement=True)
+
 def data_loaders(
-    batch_size: int = 32,
-    num_workers: int = 2,
+    batch_size: int = 64,
+    num_workers: int = 8,
     img_size: int = 224,
     seed: int = 42,
     use_weighted_sampler: bool = True,
-    triplet_mode: bool = False
+    triplet_mode: bool = False,
 ) -> dict[str, object]:
     """
+    Builds DataLoaders for either:
+      - triplet_mode=True: TripletSet with optional weighted *anchor* sampling, or
+      - triplet_mode=False: standard classification loaders with optional weighted sampling.
+
     Returns:
       {
-        'train': DataLoader,
-        'val': DataLoader,
-        'test': DataLoader,
-        'train_cls_weights': torch.Tensor (for CE),
-        'splits': {'train':(paths,labels), 'val':(...), 'test':(...)}
+        "train": DataLoader,
+        "val":   DataLoader,
+        "test":  DataLoader,
+        "train_cls_weights": torch.Tensor,
+        "splits": {"train": (paths,labels), "val": (...), "test": (...)}
       }
-    Uses the globals `image_paths, labels` you prepared above.
     """
     set_seed(seed)
     (tr_x, tr_y), (va_x, va_y), (te_x, te_y) = split_data(image_paths, labels, seed=seed)
     train_tfm, eval_tfm = make_transforms(img_size)
 
     if triplet_mode:
+        # ---- Triplet pretraining branch ----
+        # Dataset where the DataLoader-provided index is the *anchor* index.
         train_set = TripletSet(tr_x, tr_y, tfm=train_tfm)
-        
-        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
-                                num_workers=num_workers, pin_memory=True, drop_last=True)
+
+        if use_weighted_sampler:
+            # Weighted anchors ∝ 1 / class_freq(anchor_class)
+            sampler = make_weighted_anchor_sampler(tr_y)
+            train_loader = DataLoader(
+                train_set,
+                batch_size=batch_size,
+                sampler=sampler,
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=True,
+            )
+        else:
+            train_loader = DataLoader(
+                train_set,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=True,
+            )
+
+        # Val/Test are plain classification batches for metrics
         val_set  = SkinLesionDataset(va_x, va_y, tfm=eval_tfm)
         test_set = SkinLesionDataset(te_x, te_y, tfm=eval_tfm)
         val_loader  = DataLoader(val_set,  batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True)
+                                 num_workers=num_workers, pin_memory=True)
         test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True)
+                                 num_workers=num_workers, pin_memory=True)
         cls_w = class_weights(tr_y)
+
     else:
+        # ---- Classification branch ----
         train_set = SkinLesionDataset(tr_x, tr_y, tfm=train_tfm)
         val_set   = SkinLesionDataset(va_x, va_y, tfm=eval_tfm)
         test_set  = SkinLesionDataset(te_x, te_y, tfm=eval_tfm)
 
         if use_weighted_sampler:
             sampler = make_weighted_sampler(tr_y)
-            train_loader = DataLoader(train_set, batch_size=batch_size, sampler=sampler,
-            num_workers=num_workers, pin_memory=True, drop_last=True)
+            train_loader = DataLoader(
+                train_set,
+                batch_size=batch_size,
+                sampler=sampler,
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=True,
+            )
         else:
-            train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
-            num_workers=num_workers, pin_memory=True, drop_last=True)
+            train_loader = DataLoader(
+                train_set,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=True,
+            )
 
         val_loader  = DataLoader(val_set,  batch_size=batch_size, shuffle=False,
-                                num_workers=num_workers, pin_memory=True)
+                                 num_workers=num_workers, pin_memory=True)
         test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False,
-                                num_workers=num_workers, pin_memory=True)
+                                 num_workers=num_workers, pin_memory=True)
         cls_w = class_weights(tr_y)
 
     return {
         "train": train_loader,
         "val":   val_loader,
         "test":  test_loader,
-        "train_cls_weights": cls_w,  # handy for nn.CrossEntropyLoss(weight=cls_w.to(device))
+        "train_cls_weights": cls_w,
         "splits": {
             "train": (tr_x, tr_y),
             "val":   (va_x, va_y),
             "test":  (te_x, te_y),
-        }
+        },
     }
 
 
 meta_path, images_folder = prepare_isic2020()
 
 image_paths, labels = load_data(meta_path, images_folder)
+print(f"Loaded {len(image_paths)} images.")
