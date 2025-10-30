@@ -33,3 +33,25 @@ loaders_triplet = data_loaders(batch_size=args.batch_size, num_workers=args.num_
 loaders_clf = data_loaders(batch_size=args.batch_size, num_workers=args.num_workers,
                            img_size=args.img_size, seed=args.seed, triplet_mode=False, use_weighted_sampler=True)
 
+
+@torch.no_grad()
+def evaluate_classifier(model, loader, device):
+    model.eval()
+    correct = 0; total = 0
+    all_probs = []; all_targets = []
+    for images, targets, _ in loader:
+        images = images.to(device); targets = targets.to(device)
+        logits, _ = model(images)
+        probs = logits.softmax(dim=1)[:, 1]
+        preds = logits.argmax(dim=1)
+        correct += (preds == targets).sum().item()
+        total += targets.numel()
+        all_probs.append(probs.detach().cpu())
+        all_targets.append(targets.detach().cpu())
+    acc = correct / max(1, total)
+    probs = torch.cat(all_probs).numpy()
+    targs = torch.cat(all_targets).numpy()
+    try: auc = roc_auc_score(targs, probs)
+    except ValueError: auc = float("nan")
+    return acc, auc
+
