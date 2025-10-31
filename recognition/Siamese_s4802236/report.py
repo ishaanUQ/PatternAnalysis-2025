@@ -16,38 +16,85 @@ from sklearn.metrics import (
 from dataset import data_loaders_from_disk
 from modules import build_model, set_device, collect_probs_targets
 
+# ── Plot helpers ─────────────────────────────────────────────────────────────
 
 def plot_training_curves(H):
+    """Plot loss, accuracy, and (if available) AUROC across epochs."""
     epochs = H["epoch"]
-    plt.figure(); plt.plot(epochs, H["train_loss"], label="Train loss"); plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.title("Training Loss"); plt.legend(); plt.grid(True, alpha=0.3)
-    plt.figure(); plt.plot(epochs, H["train_acc"], label="Train acc"); plt.plot(epochs, H["val_acc"], label="Val acc"); plt.xlabel("Epoch"); plt.ylabel("Accuracy"); plt.title("Accuracy (Train vs Val)"); plt.legend(); plt.grid(True, alpha=0.3)
-    if (not np.all(np.isnan(H.get("train_auc", []))) if len(H.get("train_auc", []))>0 else False) or (not np.all(np.isnan(H.get("val_auc", []))) if len(H.get("val_auc", []))>0 else False):
-        plt.figure(); plt.plot(epochs, H.get("train_auc", []), label="Train AUROC"); plt.plot(epochs, H.get("val_auc", []), label="Val AUROC"); plt.xlabel("Epoch"); plt.ylabel("AUROC"); plt.title("AUROC (Train vs Val)"); plt.legend(); plt.grid(True, alpha=0.3); plt.ylim(0.5, 1.0)
+
+    # Loss
+    plt.figure()
+    plt.plot(epochs, H["train_loss"], label="Train loss")
+    plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.title("Training Loss")
+    plt.legend(); plt.grid(True, alpha=0.3)
+
+    # Accuracy
+    plt.figure()
+    plt.plot(epochs, H["train_acc"], label="Train acc")
+    plt.plot(epochs, H["val_acc"], label="Val acc")
+    plt.xlabel("Epoch"); plt.ylabel("Accuracy"); plt.title("Accuracy (Train vs Val)")
+    plt.legend(); plt.grid(True, alpha=0.3)
+
+    # AUROC (if present and not all NaN)
+    tr_auc = H.get("train_auc", [])
+    va_auc = H.get("val_auc", [])
+    if (len(tr_auc) > 0 and not np.all(np.isnan(tr_auc))) or (len(va_auc) > 0 and not np.all(np.isnan(va_auc))):
+        plt.figure()
+        plt.plot(epochs, tr_auc, label="Train AUROC")
+        plt.plot(epochs, va_auc, label="Val AUROC")
+        plt.xlabel("Epoch"); plt.ylabel("AUROC"); plt.title("AUROC (Train vs Val)")
+        plt.legend(); plt.grid(True, alpha=0.3); plt.ylim(0.5, 1.0)
+
     plt.show()
 
 
 def show_confusion(cm, labels=("normal","melanoma"), title="Confusion Matrix"):
-    plt.figure(); im = plt.imshow(cm, interpolation="nearest"); plt.title(title); plt.colorbar(im, fraction=0.046, pad=0.04)
-    ticks = np.arange(len(labels)); plt.xticks(ticks, labels, rotation=45); plt.yticks(ticks, labels)
+    """Heatmap confusion matrix with integer counts annotated."""
+    plt.figure()
+    im = plt.imshow(cm, interpolation="nearest")
+    plt.title(title); plt.colorbar(im, fraction=0.046, pad=0.04)
+    ticks = np.arange(len(labels))
+    plt.xticks(ticks, labels, rotation=45); plt.yticks(ticks, labels)
     thresh = cm.max() / 2.0
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
-            plt.text(j, i, format(cm[i, j], "d"), ha="center", va="center", color=("white" if cm[i, j] > thresh else "black"))
-    plt.ylabel("True label"); plt.xlabel("Predicted label"); plt.tight_layout(); plt.show()
+            plt.text(j, i, format(cm[i, j], "d"),
+                    ha="center", va="center",
+                    color=("white" if cm[i, j] > thresh else "black"))
+    plt.ylabel("True label"); plt.xlabel("Predicted label")
+    plt.tight_layout(); plt.show()
 
 
 def plot_roc_pr(y_true, y_prob, split_name):
+    """ROC and PR curves with AUC/AP annotated."""
+
+    # ROC
     fpr, tpr, _ = roc_curve(y_true, y_prob)
     auc = roc_auc_score(y_true, y_prob)
-    plt.figure(); plt.plot(fpr, tpr, label=f"AUC={auc:.3f}"); plt.plot([0,1],[0,1],'--'); plt.xlabel("FPR"); plt.ylabel("TPR"); plt.title(f"{split_name} ROC"); plt.legend(); plt.grid(True, alpha=0.3)
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"AUC={auc:.3f}")
+    plt.plot([0, 1], [0, 1], "--")
+    plt.xlabel("FPR"); plt.ylabel("TPR"); plt.title(f"{split_name} ROC")
+    plt.legend(); plt.grid(True, alpha=0.3)
+
+    # PR
     prec, rec, _ = precision_recall_curve(y_true, y_prob)
     ap = average_precision_score(y_true, y_prob)
-    plt.figure(); plt.plot(rec, prec, label=f"AP={ap:.3f}"); plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title(f"{split_name} Precision-Recall"); plt.legend(); plt.grid(True, alpha=0.3)
+    plt.figure()
+    plt.plot(rec, prec, label=f"AP={ap:.3f}")
+    plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title(f"{split_name} Precision-Recall")
+    plt.legend(); plt.grid(True, alpha=0.3)
+
     plt.show()
 
+# ── Model load ───────────────────────────────────────────────────────────────
 
 def load_classifier(device, embed_dim=128, backbone="resnet18", ckpt_path: Path | None = None):
-    clf = build_model(mode="classifier", embed_dim=embed_dim, pretrained=False, freeze_until="none", backbone=backbone).to(device)  # type: ignore[arg-type]
+    """
+    Build the classifier graph and load checkpoint weights.
+    """
+    clf = build_model(mode="classifier", embed_dim=embed_dim, pretrained=False,
+                    freeze_until="none", backbone=backbone).to(device)
     if ckpt_path is None or not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     blob = torch.load(ckpt_path, map_location=device)
@@ -56,8 +103,17 @@ def load_classifier(device, embed_dim=128, backbone="resnet18", ckpt_path: Path 
     clf.eval()
     return clf
 
+# ── CLI ──────────────────────────────────────────────────────────────────────
 
 def main():
+    """
+    Load loaders + checkpoint, optionally plot training curves, and produce:
+    * confusion matrices,
+    * ROC/PR plots,
+    * textual classification reports,
+    * accuracy + AUROC per split.
+    """
+
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", type=str, required=True)
     p.add_argument("--history", type=str, default=None, help="Optional JSON history saved by train.py")
@@ -78,11 +134,13 @@ def main():
         triplet_mode=False, use_weighted_sampler=False,
     )
 
+    # Optional: plot curves from training history
     if args.history and Path(args.history).exists():
         with open(args.history, "r") as f:
             H = json.load(f)
         plot_training_curves(H)
 
+    # Evaluate checkpoint and plot diagnostics per split
     clf = load_classifier(device, embed_dim=args.embed_dim, backbone=args.backbone, ckpt_path=Path(args.ckpt))
 
     # Train/Val/Test metrics + plots

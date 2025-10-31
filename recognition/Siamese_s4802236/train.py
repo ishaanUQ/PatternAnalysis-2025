@@ -1,6 +1,16 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# train.py
-# ─────────────────────────────────────────────────────────────────────────────
+"""
+train.py
+---------
+End-to-end pipeline:
+1) (Optional) triplet pretraining,
+2) classifier fine-tuning,
+3) test evaluation,
+4) save checkpoint + training history,
+5) (Optional) immediately run prediction metrics using the saved checkpoint.
+
+Run:
+    python train.py --num_workers _ --run_predict
+"""
 
 import argparse, time, json
 from datetime import datetime
@@ -16,8 +26,13 @@ from modules import (
     set_device, evaluate_classifier,
 )
 
+# ── Training stages ──────────────────────────────────────────────────────────
 
 def train_triplet(epochs, device, loaders, embed_dim=128, freeze_until="layer2", lr=3e-4, weight_decay=1e-4, backbone="resnet18"):
+    """
+    Stage 1: metric-learning pretraining with triplet loss.
+    """
+
     print(f"[Stage 1] Triplet pretraining for {epochs} epoch(s)")
     model = build_model(mode="triplet", embed_dim=embed_dim, pretrained=True, freeze_until=freeze_until, backbone=backbone).to(device)
     criterion = TripletMarginLossWrapper(margin=0.3)
@@ -52,9 +67,15 @@ def train_classifier(
     patience=5,
     backbone="resnet18",
 ):
+    """
+    Stage 2: classifier fine-tuning with class-balanced loss and early stopping.
+    """
+
     print(f"[Stage 2] Classifier fine-tune for {epochs} epoch(s)")
     clf = build_model(mode="classifier", embed_dim=embed_dim, pretrained=True,
                       freeze_until=freeze_until, num_classes=2, backbone=backbone).to(device)
+    
+    # Reuse encoder weights from triplet stage, if available
     if triplet_model is not None:
         clf.encoder.load_state_dict(triplet_model.encoder.state_dict(), strict=False)
         print("  Loaded encoder weights from triplet pretrain.")
@@ -111,6 +132,7 @@ def train_classifier(
               f"train_acc {train_acc:.4f} | train_auc {train_auc:.4f} | "
               f"val_acc {val_acc:.4f} | val_auc {val_auc:.4f} | {time.time()-t0:.1f}s")
 
+        # Early stopping on validation accuracy
         if val_acc > best_val:
             best_val = val_acc
             es_left = patience
@@ -128,9 +150,14 @@ def train_classifier(
     return clf, history, best_state
 
 
+# ── Predict hook (called after training) ─────────────────────────────────────
+
 def run_predict_from_train(ckpt_path: Path, root: str, img_size: int, num_workers: int, batch_size: int, seed: int, embed_dim: int, backbone: str):
-    """Lightweight in-process version of predict.py's main logic, so train.py
-    can optionally evaluate all splits using the freshly saved checkpoint."""
+    """
+    In-process version of predict.py so train.py can evaluate freshly saved weights
+    across train/val/test without spawning a new process.
+    """
+
     from modules import build_model, set_device, evaluate_classifier
     from dataset import data_loaders_from_disk
 
@@ -153,8 +180,13 @@ def run_predict_from_train(ckpt_path: Path, root: str, img_size: int, num_worker
             msg += f"  AUROC={auc:.4f}"
         print(msg)
 
+# ── CLI ──────────────────────────────────────────────────────────────────────
 
 def main():
+    """
+    Parse CLI flags, run the full pipeline, save outputs, and optionally run prediction.
+    """
+
     p = argparse.ArgumentParser()
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--img_size", type=int, default=224)
@@ -199,6 +231,7 @@ def main():
         patience=5, backbone=args.backbone,
     )
 
+    # Final test metrics on the classification loaders
     te_acc, te_auc = evaluate_classifier(clf, loaders_clf["test"], device)
     print(f"[RESULT] Test accuracy: {te_acc:.4f} | Test AUROC: {te_auc:.4f}")
 
@@ -214,7 +247,7 @@ def main():
         json.dump(history, f)
     print(f"Saved checkpoint → {ckpt_path}")
 
-    # Optional: immediately run predict pipeline using the saved ckpt
+    # Optional: immediately evaluate the saved checkpoint
     if args.run_predict:
         print("[RUN PREDICT] Evaluating saved checkpoint across train/val/test…")
         run_predict_from_train(

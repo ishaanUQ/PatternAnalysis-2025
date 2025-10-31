@@ -1,6 +1,11 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# predict.py
-# ─────────────────────────────────────────────────────────────────────────────
+"""
+predict.py
+-----------
+Load a saved checkpoint and report metrics on train/val/test splits.
+
+Run:
+    python predict.py --ckpt checkpoints/siamese_classifier_*.pt --num_workers 0
+"""
 
 import argparse
 from pathlib import Path
@@ -11,6 +16,10 @@ from modules import build_model, set_device, evaluate_classifier
 
 
 def load_classifier(device, embed_dim=128, backbone="resnet18", ckpt_path: Path | None = None):
+    """
+    Instantiate the classifier architecture and load the given checkpoint.
+    """
+
     clf = build_model(mode="classifier", embed_dim=embed_dim, pretrained=False, freeze_until="none", backbone=backbone).to(device)  # type: ignore[arg-type]
     if ckpt_path is None or not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
@@ -22,6 +31,10 @@ def load_classifier(device, embed_dim=128, backbone="resnet18", ckpt_path: Path 
 
 
 def main():
+    """
+    CLI: build loaders, load model weights, print metrics per split.
+    """
+    
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", type=str, required=True)
     p.add_argument("--root", type=str, default="data")
