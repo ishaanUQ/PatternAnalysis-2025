@@ -1,21 +1,29 @@
-# dataset.py
+from __future__ import annotations
 
-### IMPORTS ###
-import os, sys, subprocess, shutil, random
+import os, random, shutil
 from pathlib import Path
-import pandas as pd
+from typing import Optional, Literal
+
 import numpy as np
+import pandas as pd
 import torch
-import kagglehub as kh
-from torchvision import transforms
-from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torchvision import transforms
 from PIL import Image
-### FUNCTIONS ###
-def prepare_isic2020(clean_root: str | Path ="data", force: bool = False) -> tuple[Path, Path]:
-    """Prepares the ISIC 2020 224x224 dataset from Kaggle (Colab-friendly)."""
-    os.environ["KAGGLE_USERNAME"] = "ishaansood1"
-    os.environ["KAGGLE_KEY"] = "27613e6479fb99452da36eb26b5c5cb3"
+import kagglehub as kh
+from sklearn.model_selection import train_test_split
+# == Core preparation ==
+
+def prepare_isic2020(clean_root: str | Path = "data", force: bool = False) -> tuple[Path, Path]:
+    """Download (via kagglehub) and materialise ISIC2020 224×224 JPGs locally.
+
+    Returns (metadata_path, images_folder).
+    """
+    if kh is None:
+        raise RuntimeError("kagglehub not available. `pip install kagglehub` or run on Colab.")
+
+    # If you rely on Kaggle API creds, export them before running, e.g.:
+    # os.environ["KAGGLE_USERNAME"] = "..."; os.environ["KAGGLE_KEY"] = "..."
 
     src_path = kh.dataset_download("nischaydnk/isic-2020-jpg-224x224-resized")
     src_root = Path(src_path)
@@ -51,7 +59,7 @@ def prepare_isic2020(clean_root: str | Path ="data", force: bool = False) -> tup
     df.to_csv(metadata_path, index=False)
     return metadata_path, images_folder
 
-def load_data(metadata_path: Path, images_folder: Path):
+def load_data(metadata_path: Path, images_folder: Path) -> tuple[np.ndarray, np.ndarray]:
     md = pd.read_csv(metadata_path)
     labels_dict = dict(zip(md["image_name"].astype(str), md["target"]))
     image_paths = [images_folder / n for n in md["image_name"] if (images_folder / n).exists()]
@@ -67,15 +75,16 @@ def split_data(images: np.ndarray, labels: np.ndarray, seed: int = 42):
     return (tr_x, tr_y), (va_x, va_y), (te_x, te_y)
 
 
+# == Determinism & transforms ==
+
 def set_seed(seed: int = 42):
     random.seed(seed); np.random.seed(seed)
     torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = True
 
+
 def make_transforms(img_size: int = 224):
-    norm = transforms.Normalize([0.485, 0.456, 0.406],
-                                [0.229, 0.224, 0.225])
-    # compact, not copied: HFlip + mild affine + mild color jitter
+    norm = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     train_tfm = transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.RandomHorizontalFlip(p=0.5),
@@ -90,8 +99,12 @@ def make_transforms(img_size: int = 224):
         norm,
     ])
     return train_tfm, eval_tfm
+
+
+# == Datasets ==
+
 class SkinLesionDataset(Dataset):
-    """(image, label, path)."""
+    """Returns (image, label, path)."""
     def __init__(self, image_paths, labels, tfm=None):
         self.paths = image_paths
         self.labels = labels.astype(int)
@@ -103,51 +116,41 @@ class SkinLesionDataset(Dataset):
         if self.tfm: img = self.tfm(img)
         return img, int(self.labels[i]), str(p)
 
+
 class TripletSet(Dataset):
     """
-    Triplet dataset where the DataLoader index is the *anchor index*.
-    We then sample:
-    - a positive from the same class (different index),
-    - a negative from the other class.
-    This makes it compatible with WeightedRandomSampler over anchors.
+    Dataset for triplet training. The DataLoader index is the anchor index.
+    We sample a positive (same class, different index) and a negative (other class).
     """
     def __init__(self, image_paths, labels, tfm=None):
         self.paths  = image_paths
         self.labels = labels.astype(int)
         self.tfm    = tfm
-
-        # precompute indices by class for fast sampling
         self.by_class = {
             0: np.where(self.labels == 0)[0].tolist(),
             1: np.where(self.labels == 1)[0].tolist(),
         }
-
     def __len__(self):
-        # one anchor per image -> sampler can reweight/oversample
         return len(self.paths)
-
     def _load(self, idx: int):
         img = Image.open(self.paths[idx]).convert("RGB")
         return self.tfm(img) if self.tfm else transforms.ToTensor()(img)
-
     def __getitem__(self, anchor_idx: int):
         y_anchor = int(self.labels[anchor_idx])
-
-        # choose a positive (same class, different index)
         pos_idx = anchor_idx
         same_pool = self.by_class[y_anchor]
         if len(same_pool) > 1:
             while pos_idx == anchor_idx:
                 pos_idx = random.choice(same_pool)
-
-        # choose a negative (other class)
         other_class = 1 - y_anchor
         neg_idx = random.choice(self.by_class[other_class])
-
         A = self._load(anchor_idx)
         P = self._load(pos_idx)
         N = self._load(neg_idx)
         return A, P, N, y_anchor
+
+
+# == Sampling & weights ==
 
 def class_weights(labels: np.ndarray) -> torch.Tensor:
     vals, counts = np.unique(labels, return_counts=True)
@@ -155,23 +158,26 @@ def class_weights(labels: np.ndarray) -> torch.Tensor:
     w = {int(c): float(1.0 / f) for c, f in zip(vals, freqs)}
     return torch.tensor([w[0], w[1]], dtype=torch.float32)
 
+
 def make_weighted_sampler(labels: np.ndarray) -> WeightedRandomSampler:
     vals, counts = np.unique(labels, return_counts=True)
     freq = {int(v): float(c) for v, c in zip(vals, counts)}
     weights = np.array([1.0 / freq[int(y)] for y in labels], dtype=np.float32)
     return WeightedRandomSampler(weights, num_samples=len(labels), replacement=True)
 
+
 def make_weighted_anchor_sampler(labels: np.ndarray) -> WeightedRandomSampler:
-    """
-    For triplet training: per-anchor weights ∝ 1 / class_freq(anchor_class).
-    This balances anchor selection across classes.
-    """
     vals, counts = np.unique(labels, return_counts=True)
     freq = {int(v): float(c) for v, c in zip(vals, counts)}
     weights = np.array([1.0 / freq[int(y)] for y in labels], dtype=np.float32)
     return WeightedRandomSampler(weights, num_samples=len(labels), replacement=True)
 
+
+# == DataLoader builders ==
+
 def data_loaders(
+    image_paths: np.ndarray,
+    labels: np.ndarray,
     batch_size: int = 64,
     num_workers: int = 8,
     img_size: int = 224,
@@ -179,51 +185,27 @@ def data_loaders(
     use_weighted_sampler: bool = True,
     triplet_mode: bool = False,
 ) -> dict[str, object]:
-    """
-    Builds DataLoaders for either:
-      - triplet_mode=True: TripletSet with optional weighted *anchor* sampling, or
-      - triplet_mode=False: standard classification loaders with optional weighted sampling.
+    """Construct DataLoaders from already loaded arrays.
 
-    Returns:
-      {
-        "train": DataLoader,
-        "val":   DataLoader,
-        "test":  DataLoader,
-        "train_cls_weights": torch.Tensor,
-        "splits": {"train": (paths,labels), "val": (...), "test": (...)}
-      }
+    Returns a dict with loaders and the split arrays for downstream usage.
     """
     set_seed(seed)
     (tr_x, tr_y), (va_x, va_y), (te_x, te_y) = split_data(image_paths, labels, seed=seed)
     train_tfm, eval_tfm = make_transforms(img_size)
 
     if triplet_mode:
-        # ---- Triplet pretraining branch ----
-        # Dataset where the DataLoader-provided index is the *anchor* index.
         train_set = TripletSet(tr_x, tr_y, tfm=train_tfm)
-
         if use_weighted_sampler:
-            # Weighted anchors ∝ 1 / class_freq(anchor_class)
             sampler = make_weighted_anchor_sampler(tr_y)
             train_loader = DataLoader(
-                train_set,
-                batch_size=batch_size,
-                sampler=sampler,
-                num_workers=num_workers,
-                pin_memory=True,
-                drop_last=True,
+                train_set, batch_size=batch_size, sampler=sampler,
+                num_workers=num_workers, pin_memory=True, drop_last=True,
             )
         else:
             train_loader = DataLoader(
-                train_set,
-                batch_size=batch_size,
-                shuffle=True,
-                num_workers=num_workers,
-                pin_memory=True,
-                drop_last=True,
+                train_set, batch_size=batch_size, shuffle=True,
+                num_workers=num_workers, pin_memory=True, drop_last=True,
             )
-
-        # Val/Test are plain classification batches for metrics
         val_set  = SkinLesionDataset(va_x, va_y, tfm=eval_tfm)
         test_set = SkinLesionDataset(te_x, te_y, tfm=eval_tfm)
         val_loader  = DataLoader(val_set,  batch_size=batch_size, shuffle=False,
@@ -231,33 +213,21 @@ def data_loaders(
         test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False,
                                  num_workers=num_workers, pin_memory=True)
         cls_w = class_weights(tr_y)
-
     else:
-        # ---- Classification branch ----
         train_set = SkinLesionDataset(tr_x, tr_y, tfm=train_tfm)
         val_set   = SkinLesionDataset(va_x, va_y, tfm=eval_tfm)
         test_set  = SkinLesionDataset(te_x, te_y, tfm=eval_tfm)
-
         if use_weighted_sampler:
             sampler = make_weighted_sampler(tr_y)
             train_loader = DataLoader(
-                train_set,
-                batch_size=batch_size,
-                sampler=sampler,
-                num_workers=num_workers,
-                pin_memory=True,
-                drop_last=True,
+                train_set, batch_size=batch_size, sampler=sampler,
+                num_workers=num_workers, pin_memory=True, drop_last=True,
             )
         else:
             train_loader = DataLoader(
-                train_set,
-                batch_size=batch_size,
-                shuffle=True,
-                num_workers=num_workers,
-                pin_memory=True,
-                drop_last=True,
+                train_set, batch_size=batch_size, shuffle=True,
+                num_workers=num_workers, pin_memory=True, drop_last=True,
             )
-
         val_loader  = DataLoader(val_set,  batch_size=batch_size, shuffle=False,
                                  num_workers=num_workers, pin_memory=True)
         test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False,
@@ -277,7 +247,17 @@ def data_loaders(
     }
 
 
-meta_path, images_folder = prepare_isic2020()
+def prepare_and_load(clean_root: str | Path = "data", force: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    md_path, img_folder = prepare_isic2020(clean_root=clean_root, force=force)
+    return load_data(md_path, img_folder)
 
-image_paths, labels = load_data(meta_path, images_folder)
-print(f"Loaded {len(image_paths)} images.")
+
+# Convenience: build loaders in one call from disk
+
+def data_loaders_from_disk(
+    clean_root: str | Path = "data",
+    force: bool = False,
+    **loader_kwargs,
+) -> dict[str, object]:
+    X, y = prepare_and_load(clean_root=clean_root, force=force)
+    return data_loaders(X, y, **loader_kwargs)

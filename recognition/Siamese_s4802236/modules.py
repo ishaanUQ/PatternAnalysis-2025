@@ -4,6 +4,7 @@ from typing import Tuple, Literal, Optional
 import torch.nn.functional as F
 import torch
 import math
+from sklearn.metrics import roc_auc_score, roc_curve
 def _load_backbone(name="resnet50", pretrained=True):
     if name=="resnet18":
         m = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None); dim=512
@@ -27,13 +28,13 @@ class ProjectionHead(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(self, embed_dim=128, pretrained=True,
-                freeze_until: Optional[Literal["none","layer1","layer2","layer3"]] = None,
-                backbone: Literal["resnet18","resnet50"]="resnet18"):
+                 freeze_until: Optional[Literal["none","layer1","layer2","layer3"]] = None,
+                 backbone: Literal["resnet18","resnet50"] = "resnet18"):
         super().__init__()
         self.backbone, out_dim = _load_backbone(backbone, pretrained=pretrained)
         self.proj = ProjectionHead(in_dim=out_dim, embed_dim=embed_dim)
         if freeze_until and freeze_until != "none":
-            self._freeze_resnet_layers(until=freeze_until)
+            self._freeze_resnet_layers(until=freeze_until)  # type: ignore[arg-type]
 
     @torch.no_grad()
     def _freeze_resnet_layers(self, until: Literal["layer1","layer2","layer3"]):
@@ -41,7 +42,7 @@ class Encoder(nn.Module):
             for p in m.parameters(): p.requires_grad = False
         freeze(self.backbone.conv1); freeze(self.backbone.bn1)
         freeze(self.backbone.layer1)
-        if until in ("layer2","layer3"): freeze(self.backbone.layer2)
+        if until in ("layer2", "layer3"): freeze(self.backbone.layer2)
         if until == "layer3": freeze(self.backbone.layer3)
 
     def forward(self, x):
@@ -52,7 +53,7 @@ class SiameseTripletNet(nn.Module):
         super().__init__(); self.encoder = encoder
     def forward(self, A, P, N):
         B = A.shape[0]
-        Z = self.encoder(torch.cat([A,P,N], dim=0))
+        Z = self.encoder(torch.cat([A, P, N], dim=0))
         return torch.split(Z, B, dim=0)
 
 class SiameseClassifier(nn.Module):
@@ -65,17 +66,20 @@ class SiameseClassifier(nn.Module):
     def forward(self, x):
         z = self.encoder(x)
         return self.head(z), z
+
+
 class TripletMarginLossWrapper(nn.Module):
     def __init__(self, margin: float = 0.3, p: float = 2.0, swap: bool = False):
         super().__init__(); self.loss = nn.TripletMarginLoss(margin=margin, p=p, swap=swap)
     def forward(self, zA, zP, zN): return self.loss(zA, zP, zN)
 
-def build_model(mode: Literal["triplet","classifier"]="triplet", embed_dim=128,
+def build_model(mode: Literal["triplet","classifier"] = "triplet", embed_dim=128,
                 pretrained=True, freeze_until="layer2", num_classes=2, backbone="resnet18"):
     enc = Encoder(embed_dim=embed_dim, pretrained=pretrained, freeze_until=freeze_until, backbone=backbone)
     if mode=="triplet":    return SiameseTripletNet(enc)
     if mode=="classifier": return SiameseClassifier(enc, num_classes=num_classes)
     raise ValueError("Unknown mode")
+
 
 def make_optimizer(model: nn.Module, lr=3e-4, weight_decay=1e-4, head_lr_mult=2.0):
     enc = model.encoder if hasattr(model, "encoder") else model
@@ -83,11 +87,12 @@ def make_optimizer(model: nn.Module, lr=3e-4, weight_decay=1e-4, head_lr_mult=2.
     bb = [p for p in enc.backbone.parameters() if p.requires_grad]
     if bb: params.append({"params": bb, "lr": lr})
     pj = [p for p in enc.proj.parameters() if p.requires_grad]
-    if pj: params.append({"params": pj, "lr": lr*head_lr_mult})
+    if pj: params.append({"params": pj, "lr": lr * head_lr_mult})
     if hasattr(model, "head"):
         hd = [p for p in model.head.parameters() if p.requires_grad]
-        if hd: params.append({"params": hd, "lr": lr*head_lr_mult})
+        if hd: params.append({"params": hd, "lr": lr * head_lr_mult})
     return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+
 
 def make_scheduler(optimizer, warmup_epochs=1, total_epochs=15):
     def lr_lambda(cur_epoch):
@@ -96,3 +101,51 @@ def make_scheduler(optimizer, warmup_epochs=1, total_epochs=15):
         t = (cur_epoch - warmup_epochs) / float(max(1, total_epochs - warmup_epochs))
         return 0.5 * (1.0 + math.cos(math.pi * t))
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+
+def set_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def evaluate_classifier(model: nn.Module, loader, device) -> tuple[float, float]:
+    model.eval()
+    correct = 0; total = 0
+    all_probs = []; all_targets = []
+    with torch.no_grad():
+        for images, targets, _ in loader:
+            images = images.to(device); targets = targets.to(device)
+            logits, _ = model(images)
+            probs = logits.softmax(dim=1)[:, 1]
+            preds = logits.argmax(dim=1)
+            correct += (preds == targets).sum().item()
+            total += targets.numel()
+            all_probs.append(probs.detach().cpu())
+            all_targets.append(targets.detach().cpu())
+    acc = correct / max(1, total)
+    probs = torch.cat(all_probs).numpy()
+    targs = torch.cat(all_targets).numpy()
+    try:
+        auc = roc_auc_score(targs, probs)
+    except ValueError:
+        auc = float("nan")
+    return acc, auc
+
+
+@torch.no_grad()
+def collect_probs_targets(model: nn.Module, loader, device):
+    model.eval()
+    import numpy as np
+    probs = []; targs = []; preds = []
+    for images, targets, _ in loader:
+        images = images.to(device); targets = targets.to(device)
+        logits, _ = model(images)
+        p = logits.softmax(dim=1)[:, 1]
+        yhat = logits.argmax(dim=1)
+        probs.append(p.detach().cpu().numpy())
+        targs.append(targets.detach().cpu().numpy())
+        preds.append(yhat.detach().cpu().numpy())
+    return np.concatenate(probs), np.concatenate(targs), np.concatenate(preds)
