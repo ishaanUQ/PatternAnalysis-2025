@@ -152,7 +152,7 @@ Training was conducted in two distinct stages — Triplet Pretraining and Classi
 - The model is then fine-tuned end-to-end using Cross-Entropy Loss with class weights to address dataset imbalance.
 - Optimisation is performed using the AdamW optimiser with a cosine-annealing learning rate schedule, and early stopping is triggered based on validation accuracy and the best performing model is saved as `checkpoint_best.pth`.
 
-#### Predictionm and Evaluation Phase
+#### Prediction and Evaluation Phase
 
 Once training completes, the trained model is evaluated on the test set via `predict.py` (or automatically from `train.py `with `--run_predict`).
 
